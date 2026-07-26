@@ -1,0 +1,6 @@
+python-dotenv
+zmq
+langchain
+chromadb
+pypdf
+langchain-google-genai
