@@ -1,6 +1,14 @@
 python-dotenv
-zmq
 langchain
+langchain-core
+langchain-classic
+langchain-google-genai
+langchain-chroma
+langchain-text-splitters
 chromadb
 pypdf
-langchain-google-genai
+fastapi
+uvicorn
+python-multipart
+openai-whisper
+langchain-anthropic

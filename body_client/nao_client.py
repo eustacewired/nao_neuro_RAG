@@ -1,89 +1,123 @@
-# nao_client.py (Runs on the Robot or via NAOqi environment)
+# body_client/nao_client.py (Run on your Windows laptop, talks to NAO over qi)
+#
+# Flow:
+#   1. Connect to NAO via qi
+#   2. Fetch and speak the fixed intro from the brain server
+#   3. Loop: record mic -> send audio to brain server -> speak the answer
+#      -> repeat, since the brain server's prompt already appends a
+#      follow-up question to each answer
+
 import os
 import time
-import wave
 import requests
+import qi
 
-# CONFIGURATION: Change this to your laptop's real local IP address on your Wi-Fi network
-SERVER_IP = "127.0.0.1"  # Use "127.0.0.1" if testing on the same PC, or e.g., "192.168.1.5" for the robot
-SERVER_URL = "http://{}:8000/ask".format(SERVER_IP)
-
+# ---- CONFIG: edit these for your setup ----
+NAO_IP = "10.5.17.101"
+NAO_PORT = 9561
+SERVER_IP = "127.0.0.1"  # laptop running rag_server.py -- 127.0.0.1 if same machine
+SERVER_URL = f"http://{SERVER_IP}:8000"
 AUDIO_FILE = "nao_input.wav"
+LISTEN_SECONDS = 5
+# ---------------------------------------------
 
-def record_audio_from_mic(output_filename, duration=5):
-    """
-    Records audio cleanly from the microphone using sounddevice and built-in wave.
-    No SciPy or PyAudio compilation required!
-    """
+
+def record_audio_from_mic(output_filename, duration=LISTEN_SECONDS):
+    """Records from the laptop's own microphone (not NAO's) using sounddevice."""
     import sounddevice as sd
-    import numpy as np
     import wave
 
-    fs = 16000  # 16kHz is ideal for Whisper
-    print("🤖 NAO: Listening... Speak now.")
-    
-    # Record audio into a numpy array (16-bit integers)
-    recording = sd.rec(int(duration * fs), samplerate=fs, channels=1, dtype='int16')
-    sd.wait()  # Wait until the recording timer finishes
-    
-    print("🤖 NAO: Recording stopped. Processing...")
-    
-    # Save the raw numpy binary data directly using Python's built-in wave library
-    with wave.open(output_filename, 'wb') as wf:
+    fs = 16000  # 16kHz is what Whisper expects
+    print("Listening... speak now.")
+    recording = sd.rec(int(duration * fs), samplerate=fs, channels=1, dtype="int16")
+    sd.wait()
+    print("Recording stopped. Sending to brain server...")
+
+    with wave.open(output_filename, "wb") as wf:
         wf.setnchannels(1)
-        wf.setsampwidth(2) # 16-bit audio is exactly 2 bytes
+        wf.setsampwidth(2)
         wf.setframerate(fs)
         wf.writeframes(recording.tobytes())
 
 
-def send_audio_to_brain(filename):
-    """Sends the audio file to the laptop over Wi-Fi and gets the text response."""
-    print("🤖 NAO: Sending audio to laptop brain via Wi-Fi...")
+def get_intro():
+    """Fetches the fixed introduction text from the brain server."""
     try:
-        with open(filename, 'rb') as f:
-            files = {'audio': (filename, f, 'audio/wav')}
-            response = requests.post(SERVER_URL, files=files)
-            
+        response = requests.get(f"{SERVER_URL}/intro")
+        return response.json().get("answer")
+    except Exception as e:
+        print(f"Could not reach brain server for intro: {e}")
+        return "Hi, I'm NAO. I'm having trouble reaching my brain server right now."
+
+
+def ask_brain(filename):
+    """Sends recorded audio to the brain server, gets back question + answer text."""
+    try:
+        with open(filename, "rb") as f:
+            files = {"audio": (filename, f, "audio/wav")}
+            response = requests.post(f"{SERVER_URL}/ask", files=files)
         if response.status_code == 200:
             return response.json()
-        else:
-            print("❌ Error: Server returned status code {}".format(response.status_code))
-            return None
+        print(f"Server returned status {response.status_code}")
+        return None
     except Exception as e:
-        print("❌ Network Connection Error: {}".format(e))
+        print(f"Network error talking to brain server: {e}")
         return None
 
-def nao_speak(text):
-    """
-    Commands NAO to say the text out loud.
-    """
-    print("🤖 NAO Speaking: '{}'".format(text))
-    try:
-        # This is the official Aldebaran/SoftBank framework wrapper
-        from naoqi import ALProxy
-        tts = ALProxy("ALTextToSpeech", "127.0.0.1", 9559) # Connects to local robot core
-        tts.say(text)
-    except ImportError:
-        # Fallback if you are running a test on your laptop without the robot connected
-        print("[Simulation Mode: NAOqi SDK not detected. Cannot speak physically.]")
 
 def main():
-    # 1. Record the human's question
-    record_audio_from_mic(AUDIO_FILE, duration=5)
-    
-    # 2. Transcribe and query via the laptop RAG server
-    result = send_audio_to_brain(AUDIO_FILE)
-    
-    if result:
-        print("📝 Heard Question: {}".format(result.get("question")))
-        # 3. Speak the synthesized answer from the PDFs
-        nao_speak(result.get("answer"))
-    else:
-        nao_speak("I am sorry, I am having trouble connecting to my server brain.")
+    print("Connecting to NAO...")
+    print("Connecting to NAO...")
+    tts = None
+    try:
+        session = qi.Session()
+        session.connect(f"tcp://{NAO_IP}:{NAO_PORT}")
+        tts = session.service("ALTextToSpeech")
 
-    # Clean up the local audio file on the robot
-    if os.path.exists(AUDIO_FILE):
-        os.remove(AUDIO_FILE)
+        # Optional but recommended: stop Autonomous Life from interrupting speech
+        try:
+            life = session.service("ALAutonomousLife")
+            if life.getState() != "disabled":
+                life.setState("disabled")
+        except Exception:
+            pass  # not critical if this service isn't available
+
+        print("Connected to NAO. Starting conversation.\n")
+    except RuntimeError as e:
+        print(f"Could not reach NAO ({e})")
+        print("Running in TEXT-ONLY mode -- everything else will be tested normally,\n"
+              "answers will just print here instead of NAO speaking them.\n")
+
+    def speak(text):
+        """Speaks via NAO if connected, otherwise just prints -- lets you
+        test the full mic -> Whisper -> RAG -> Gemini pipeline without
+        the robot physically present."""
+        print(f"NAO: {text}")
+        if tts is not None:
+            tts.say(text)
+
+    intro = get_intro()
+    speak(intro)
+
+    while True:
+        record_audio_from_mic(AUDIO_FILE)
+        result = ask_brain(AUDIO_FILE)
+
+        if os.path.exists(AUDIO_FILE):
+            os.remove(AUDIO_FILE)
+
+        if not result:
+            speak("Sorry, I'm having trouble reaching my brain right now.")
+            continue
+
+        question = result.get("question", "")
+        answer = result.get("answer", "")
+
+        print(f"Heard: {question}")
+
+        if answer:
+            speak(answer)
+
 
 if __name__ == "__main__":
     main()

@@ -1,4 +1,4 @@
 .env
-venv/
+vashuo/
 __pycache__/
 *.wav
